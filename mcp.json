@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "omics-ai": {
+      "command": "node",
+      "args": ["src/index.js"],
+      "cwd": "/path/to/omics-ai-mcp"
+    }
+  }
+}
