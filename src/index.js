@@ -185,6 +185,42 @@ class OmicsAIMCPServer {
               },
               required: ["network", "collection_slug", "table_name"]
             }
+          },
+          {
+            name: "sql_search",
+            description: "Execute a SQL query against a collection using Trino syntax",
+            inputSchema: {
+              type: "object",
+              properties: {
+                network: {
+                  type: "string",
+                  description: "Network name or URL",
+                },
+                collection_slug: {
+                  type: "string",
+                  description: "Collection slug name",
+                },
+                sql: {
+                  type: "string",
+                  description: "SQL query string (use Trino syntax with double quotes for identifiers)",
+                },
+                max_polls: {
+                  type: "integer",
+                  description: "Maximum number of polling attempts (default: 10)",
+                  default: 10
+                },
+                poll_interval: {
+                  type: "number",
+                  description: "Seconds to wait between polls (default: 2.0)",
+                  default: 2.0
+                },
+                access_token: {
+                  type: "string",
+                  description: "Optional access token for authentication",
+                }
+              },
+              required: ["network", "collection_slug", "sql"]
+            }
           }
         ]
       };
@@ -205,6 +241,8 @@ class OmicsAIMCPServer {
             return await this.queryTable(args);
           case "count_rows":
             return await this.countRows(args);
+          case "sql_search":
+            return await this.sqlSearch(args);
           default:
             throw new Error(`Unknown tool: ${name}`);
         }
@@ -517,6 +555,188 @@ class OmicsAIMCPServer {
     } catch (error) {
       throw new Error(`Failed to count rows: ${error.message}`);
     }
+  }
+
+  async sqlSearch(args) {
+    const { 
+      network, 
+      collection_slug, 
+      sql, 
+      max_polls = 10, 
+      poll_interval = 2.0, 
+      access_token 
+    } = args;
+    
+    const client = this.createHttpClient(network, access_token);
+    const payload = { query: sql };
+
+    try {
+      // Initial SQL query request
+      const response = await client.post(
+        `/api/collection/${encodeURIComponent(collection_slug)}/data-connect/search`,
+        payload,
+        {
+          headers: { 'Content-Type': 'application/json' }
+        }
+      );
+
+      let result;
+      if (response.headers['content-type'] && response.headers['content-type'].startsWith('application/json')) {
+        result = response.data;
+      } else {
+        try {
+          result = JSON.parse(response.data);
+        } catch (e) {
+          throw new Error(`Invalid JSON response: ${response.data.substring(0, 200)}...`);
+        }
+      }
+
+      // Check for immediate errors
+      if (result.errors && result.errors.length > 0) {
+        const errorDetails = result.errors[0].details || 'Unknown error';
+        throw new Error(`SQL query error: ${errorDetails}`);
+      }
+
+      // Check if we have immediate data (unlikely but possible)
+      if (result.data && result.data.length > 0) {
+        return this.formatSqlResults(result, sql);
+      }
+
+      // Check if we need to poll
+      let nextPageUrl = result.pagination?.next_page_url;
+      if (!nextPageUrl) {
+        // No pagination URL but empty data - query completed with no results
+        return {
+          content: [
+            {
+              type: "text",
+              text: `SQL query completed with no results\n\nQuery: ${sql}`
+            }
+          ]
+        };
+      }
+
+      // Poll for results with improved logic
+      return await this.pollSqlResults(client, nextPageUrl, sql, max_polls, poll_interval);
+
+    } catch (error) {
+      throw new Error(`Failed to execute SQL query: ${error.message}`);
+    }
+  }
+
+  async pollSqlResults(client, nextPageUrl, sql, max_polls, poll_interval) {
+    for (let pollCount = 0; pollCount < max_polls; pollCount++) {
+      await new Promise(resolve => setTimeout(resolve, poll_interval * 1000));
+
+      try {
+        const pollResponse = await client.get(nextPageUrl);
+        let pollResult;
+        
+        if (pollResponse.headers['content-type'] && pollResponse.headers['content-type'].startsWith('application/json')) {
+          pollResult = pollResponse.data;
+        } else {
+          try {
+            pollResult = JSON.parse(pollResponse.data);
+          } catch (e) {
+            throw new Error(`Invalid JSON response: ${pollResponse.data.substring(0, 200)}...`);
+          }
+        }
+
+        // Check for errors
+        if (pollResult.errors && pollResult.errors.length > 0) {
+          const errorDetails = pollResult.errors[0].details || 'Unknown error';
+          throw new Error(`SQL query error: ${errorDetails}`);
+        }
+
+        // Check if we have data
+        if (pollResult.data && pollResult.data.length > 0) {
+          return this.formatSqlResults(pollResult, sql);
+        }
+
+        // Check if we should continue polling
+        if (pollResult.data && pollResult.data.length === 0 && !pollResult.pagination?.next_page_url) {
+          // Empty results with no next page - query completed with no matches
+          return {
+            content: [
+              {
+                type: "text",
+                text: `SQL query completed with no results\n\nQuery: ${sql}`
+              }
+            ]
+          };
+        }
+
+        // Continue polling if we have a next_page_url
+        if (pollResult.pagination?.next_page_url) {
+          nextPageUrl = pollResult.pagination.next_page_url;
+          continue;
+        }
+
+        // No next page URL and empty data - return what we have
+        return {
+          content: [
+            {
+              type: "text",
+              text: `SQL query completed with no results\n\nQuery: ${sql}`
+            }
+          ]
+        };
+
+      } catch (pollError) {
+        if (pollCount < max_polls - 1) {
+          continue; // Try again
+        } else {
+          throw new Error(`Polling failed: ${pollError.message}`);
+        }
+      }
+    }
+
+    throw new Error(`SQL query timed out after ${max_polls} polls (${max_polls * poll_interval}s)`);
+  }
+
+  formatSqlResults(result, sql) {
+    const rowCount = result.data.length;
+    const hasMore = result.pagination?.next_page_url ? true : false;
+    const totalCount = result.pagination?.total || 'unknown';
+    
+    let summary = `SQL query returned ${rowCount.toLocaleString()} rows`;
+    if (hasMore) {
+      summary += ` (showing first ${rowCount}, total: ${totalCount})`;
+    }
+
+    // Format the preview data more nicely
+    const previewData = result.data.slice(0, 5);
+    let formattedData = '';
+    
+    if (previewData.length > 0) {
+      // Try to format as table if data is simple enough
+      const firstRow = previewData[0];
+      const keys = Object.keys(firstRow);
+      
+      if (keys.length <= 8 && keys.every(k => firstRow[k] !== null && typeof firstRow[k] !== 'object')) {
+        // Format as simple table
+        formattedData = '\n**Sample Results:**\n';
+        formattedData += keys.join(' | ') + '\n';
+        formattedData += keys.map(() => '---').join(' | ') + '\n';
+        
+        for (const row of previewData) {
+          formattedData += keys.map(k => String(row[k] || '')).join(' | ') + '\n';
+        }
+      } else {
+        // Format as JSON
+        formattedData = '\n**Sample Results (JSON):**\n```json\n' + 
+                      JSON.stringify(previewData, null, 2) + '\n```';
+      }
+    }
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: `${summary}\n\n**Query:** \`${sql}\`${formattedData}`
+        }
+      ]
+    };
   }
 
   async run() {

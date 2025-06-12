@@ -21,6 +21,7 @@ The MCP server provides the following tools for AI agents:
 - **`get_schema_fields`** - Examine table schemas and field types
 - **`query_table`** - Query data with filters, pagination, and ordering
 - **`count_rows`** - Count rows matching specific criteria
+- **`sql_search`** - Execute direct SQL queries using Trino syntax
 
 ## Installation
 
@@ -119,6 +120,29 @@ Counts rows matching specified filters.
 - `table_name` (required): Qualified table name
 - `filters` (optional): Filter criteria object
 - `access_token` (optional): Authentication token
+
+### sql_search
+
+Executes direct SQL queries against a collection using Trino syntax with enhanced result formatting.
+
+**Parameters:**
+- `network` (required): Network name or URL
+- `collection_slug` (required): Collection identifier  
+- `sql` (required): SQL query string (use Trino syntax with double quotes for identifiers)
+- `max_polls` (optional): Maximum number of polling attempts (default: 10)
+- `poll_interval` (optional): Seconds to wait between polls (default: 2.0)
+- `access_token` (optional): Authentication token
+
+**Features:**
+- Automatic async query polling with robust error handling
+- Intelligent result formatting (table view for simple data, JSON for complex)
+- Progress indicators and pagination info
+- Timeout management for long-running queries
+
+**Example queries:**
+- `SELECT COUNT(*) FROM "schema"."table"`
+- `SELECT * FROM "schema"."variants" WHERE chrom = 'chr1' LIMIT 10`
+- `SELECT DISTINCT chrom FROM "schema"."variants" ORDER BY chrom`
 
 ## Supported Networks
 
