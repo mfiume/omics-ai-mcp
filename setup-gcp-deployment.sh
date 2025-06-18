@@ -1,107 +1,181 @@
 #!/bin/bash
 
-# Google Cloud Run Deployment Setup Script for Omics AI MCP
-# This script helps set up the necessary GCP resources and GitHub secrets
+# Complete Setup Script for Omics AI MCP on Google Cloud Run
+# This consolidates all setup steps into one script
 
 set -e
 
-echo "=== Google Cloud Run Deployment Setup for Omics AI MCP ==="
+echo "==================================================================="
+echo "=== Complete Setup for Omics AI MCP on Google Cloud Run ==="
+echo "==================================================================="
 echo
 
-# Check if gcloud is installed
+# Check prerequisites
+echo "Checking prerequisites..."
+
 if ! command -v gcloud &> /dev/null; then
     echo "Error: gcloud CLI is not installed. Please install it first:"
-    echo "https://cloud.google.com/sdk/docs/install"
+    echo "brew install --cask google-cloud-sdk"
     exit 1
 fi
 
-# Check if gh is installed
 if ! command -v gh &> /dev/null; then
     echo "Error: GitHub CLI is not installed. Please install it first:"
-    echo "https://cli.github.com/manual/installation"
+    echo "brew install gh"
     exit 1
 fi
 
 # Get project ID
+echo
 echo "Enter your Google Cloud Project ID:"
 read -r PROJECT_ID
 
+if [ -z "$PROJECT_ID" ]; then
+    echo "Error: Project ID is required"
+    exit 1
+fi
+
+# Configuration
+REGION="us-central1"
+SERVICE_ACCOUNT_NAME="omics-ai-mcp-deployer"
+SERVICE_ACCOUNT_EMAIL="${SERVICE_ACCOUNT_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+ARTIFACT_REGISTRY_REPO="cloud-run-images"
+
+echo
+echo "Configuration:"
+echo "- Project ID: $PROJECT_ID"
+echo "- Region: $REGION"
+echo "- Service Account: $SERVICE_ACCOUNT_EMAIL"
+echo "- Artifact Registry Repository: $ARTIFACT_REGISTRY_REPO"
+echo
+echo "Press Enter to continue or Ctrl+C to cancel..."
+read -r
+
 # Set the project
+echo
+echo "Setting Google Cloud project..."
 gcloud config set project "$PROJECT_ID"
 
-# Enable required APIs
+# Enable all required APIs
 echo
 echo "Enabling required Google Cloud APIs..."
 gcloud services enable cloudbuild.googleapis.com
 gcloud services enable run.googleapis.com
 gcloud services enable containerregistry.googleapis.com
 gcloud services enable artifactregistry.googleapis.com
+gcloud services enable iam.googleapis.com
 
-# Create service account
-SERVICE_ACCOUNT_NAME="omics-ai-mcp-deployer"
-SERVICE_ACCOUNT_EMAIL="${SERVICE_ACCOUNT_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+# Wait for APIs to be ready
+echo "Waiting for APIs to be fully enabled..."
+sleep 5
 
+# Create service account if it doesn't exist
 echo
-echo "Creating service account..."
-gcloud iam service-accounts create $SERVICE_ACCOUNT_NAME \
-    --display-name="Omics AI MCP Cloud Run Deployer" \
-    --description="Service account for deploying Omics AI MCP to Cloud Run" || true
+echo "Creating service account (if not exists)..."
+if ! gcloud iam service-accounts describe $SERVICE_ACCOUNT_EMAIL &>/dev/null; then
+    gcloud iam service-accounts create $SERVICE_ACCOUNT_NAME \
+        --display-name="Omics AI MCP Cloud Run Deployer" \
+        --description="Service account for deploying Omics AI MCP to Cloud Run"
+    echo "Service account created successfully"
+else
+    echo "Service account already exists"
+fi
 
-# Grant necessary permissions
+# Grant all necessary permissions
 echo
 echo "Granting permissions to service account..."
-gcloud projects add-iam-policy-binding $PROJECT_ID \
-    --member="serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
-    --role="roles/run.admin"
 
-gcloud projects add-iam-policy-binding $PROJECT_ID \
-    --member="serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
-    --role="roles/storage.admin"
+ROLES=(
+    "roles/run.admin"
+    "roles/storage.admin"
+    "roles/iam.serviceAccountUser"
+    "roles/artifactregistry.admin"
+    "roles/cloudbuild.builds.editor"
+)
 
-gcloud projects add-iam-policy-binding $PROJECT_ID \
-    --member="serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
-    --role="roles/iam.serviceAccountUser"
+for ROLE in "${ROLES[@]}"; do
+    echo "  Adding $ROLE..."
+    gcloud projects add-iam-policy-binding $PROJECT_ID \
+        --member="serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
+        --role="$ROLE" \
+        --quiet
+done
 
-gcloud projects add-iam-policy-binding $PROJECT_ID \
-    --member="serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
-    --role="roles/artifactregistry.admin"
+# Create Artifact Registry repository
+echo
+echo "Creating Artifact Registry repository (if not exists)..."
+if ! gcloud artifacts repositories describe $ARTIFACT_REGISTRY_REPO --location=$REGION &>/dev/null; then
+    gcloud artifacts repositories create $ARTIFACT_REGISTRY_REPO \
+        --repository-format=docker \
+        --location=$REGION \
+        --description="Docker images for Cloud Run services"
+    echo "Artifact Registry repository created successfully"
+else
+    echo "Artifact Registry repository already exists"
+fi
 
-# Create and download service account key
+# Configure Docker authentication for Artifact Registry
+echo
+echo "Configuring Docker authentication for Artifact Registry..."
+gcloud auth configure-docker $REGION-docker.pkg.dev --quiet
+
+# Check if we're in a git repository
+if ! git rev-parse --git-dir &>/dev/null; then
+    echo
+    echo "Error: Not in a git repository. Please run this from your omics-ai-mcp directory."
+    exit 1
+fi
+
+# Get repository information
+REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || echo "")
+
+if [ -z "$REPO" ]; then
+    echo
+    echo "Error: Could not determine GitHub repository. Make sure you're authenticated with 'gh auth login'"
+    exit 1
+fi
+
+echo
+echo "Configuring GitHub repository secrets for: $REPO"
+
+# Create new service account key
 KEY_FILE="omics-ai-mcp-sa-key.json"
-echo
 echo "Creating service account key..."
-gcloud iam service-accounts keys create $KEY_FILE \
-    --iam-account=$SERVICE_ACCOUNT_EMAIL
-
-# Configure GitHub repository secrets
-echo
-echo "Setting up GitHub repository secrets..."
-echo "Make sure you're authenticated with GitHub CLI (gh auth login)"
-echo
-
-# Get repository name
-REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
-echo "Setting secrets for repository: $REPO"
+gcloud iam service-accounts keys create "$KEY_FILE" \
+    --iam-account=$SERVICE_ACCOUNT_EMAIL \
+    --quiet
 
 # Set GitHub secrets
+echo "Setting GitHub secrets..."
 gh secret set GCP_PROJECT_ID --body "$PROJECT_ID"
-gh secret set GCP_SERVICE_ACCOUNT_KEY < $KEY_FILE
+gh secret set GCP_SERVICE_ACCOUNT_KEY < "$KEY_FILE"
 
-# Clean up the key file
-rm -f $KEY_FILE
+# Clean up key file
+rm -f "$KEY_FILE"
 
+# Display summary
 echo
+echo "==================================================================="
 echo "=== Setup Complete! ==="
+echo "==================================================================="
+echo
+echo "✅ All Google Cloud APIs enabled"
+echo "✅ Service account created with necessary permissions"
+echo "✅ Artifact Registry repository created"
+echo "✅ Docker authentication configured"
+echo "✅ GitHub secrets configured"
 echo
 echo "Next steps:"
-echo "1. Commit and push your changes to the main/master branch"
-echo "2. The GitHub Action will automatically deploy to Cloud Run"
-echo "3. You can also manually trigger deployment from the Actions tab"
+echo "1. Commit and push your code to trigger deployment:"
+echo "   git add ."
+echo "   git commit -m 'Deploy to Cloud Run'"
+echo "   git push origin main"
 echo
-echo "Optional: Set up Cloud Build trigger for additional deployment options:"
-echo "  - Visit: https://console.cloud.google.com/cloud-build/triggers"
-echo "  - Create a new trigger connected to your GitHub repository"
-echo "  - Use the cloudbuild.yaml file in the repository"
+echo "2. Monitor deployment at:"
+echo "   https://github.com/$REPO/actions"
 echo
-echo "Your Cloud Run service will be available at:"
-echo "https://omics-ai-mcp-<hash>-<region>.a.run.app"
+echo "3. Your service will be deployed to:"
+echo "   https://omics-ai-mcp-<hash>-$REGION.a.run.app"
+echo
+echo "Docker images will be stored at:"
+echo "   $REGION-docker.pkg.dev/$PROJECT_ID/$ARTIFACT_REGISTRY_REPO/omics-ai-mcp"
