@@ -35,6 +35,7 @@ echo "Enabling required Google Cloud APIs..."
 gcloud services enable cloudbuild.googleapis.com
 gcloud services enable run.googleapis.com
 gcloud services enable containerregistry.googleapis.com
+gcloud services enable artifactregistry.googleapis.com
 
 # Create service account
 SERVICE_ACCOUNT_NAME="omics-ai-mcp-deployer"
@@ -60,6 +61,10 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
 gcloud projects add-iam-policy-binding $PROJECT_ID \
     --member="serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
     --role="roles/iam.serviceAccountUser"
+
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+    --member="serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
+    --role="roles/artifactregistry.admin"
 
 # Create and download service account key
 KEY_FILE="omics-ai-mcp-sa-key.json"
