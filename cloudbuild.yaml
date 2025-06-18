@@ -1,11 +1,11 @@
 steps:
   # Build the container image
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-t', 'gcr.io/$PROJECT_ID/omics-ai-mcp:$COMMIT_SHA', '.']
+    args: ['build', '-t', '${_REGION}-docker.pkg.dev/$PROJECT_ID/cloud-run-images/omics-ai-mcp:$COMMIT_SHA', '.']
   
-  # Push the container image to Container Registry
+  # Push the container image to Artifact Registry
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', 'gcr.io/$PROJECT_ID/omics-ai-mcp:$COMMIT_SHA']
+    args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/cloud-run-images/omics-ai-mcp:$COMMIT_SHA']
   
   # Deploy container image to Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -15,7 +15,7 @@ steps:
       - 'deploy'
       - 'omics-ai-mcp'
       - '--image'
-      - 'gcr.io/$PROJECT_ID/omics-ai-mcp:$COMMIT_SHA'
+      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/cloud-run-images/omics-ai-mcp:$COMMIT_SHA'
       - '--region'
       - '${_REGION}'
       - '--platform'

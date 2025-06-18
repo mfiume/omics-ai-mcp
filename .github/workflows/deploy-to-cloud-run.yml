@@ -34,22 +34,29 @@ jobs:
       with:
         project_id: ${{ secrets.GCP_PROJECT_ID }}
 
-    - name: Configure Docker for Google Container Registry
+    - name: Configure Docker for Google Artifact Registry
       run: |
-        gcloud auth configure-docker
+        gcloud auth configure-docker $REGION-docker.pkg.dev
+
+    - name: Create Artifact Registry repository if not exists
+      run: |
+        gcloud artifacts repositories create cloud-run-images \
+          --repository-format=docker \
+          --location=$REGION \
+          --description="Docker images for Cloud Run services" || true
 
     - name: Build Docker image
       run: |
-        docker build -t gcr.io/$PROJECT_ID/$SERVICE_NAME:$GITHUB_SHA .
+        docker build -t $REGION-docker.pkg.dev/$PROJECT_ID/cloud-run-images/$SERVICE_NAME:$GITHUB_SHA .
 
-    - name: Push Docker image to GCR
+    - name: Push Docker image to Artifact Registry
       run: |
-        docker push gcr.io/$PROJECT_ID/$SERVICE_NAME:$GITHUB_SHA
+        docker push $REGION-docker.pkg.dev/$PROJECT_ID/cloud-run-images/$SERVICE_NAME:$GITHUB_SHA
 
     - name: Deploy to Cloud Run
       run: |
         gcloud run deploy $SERVICE_NAME \
-          --image gcr.io/$PROJECT_ID/$SERVICE_NAME:$GITHUB_SHA \
+          --image $REGION-docker.pkg.dev/$PROJECT_ID/cloud-run-images/$SERVICE_NAME:$GITHUB_SHA \
           --region $REGION \
           --platform managed \
           --allow-unauthenticated \
