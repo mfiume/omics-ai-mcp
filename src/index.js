@@ -396,7 +396,7 @@ class OmicsAIMCPServer {
           {
             type: "text",
             text: `Found ${tables.length} tables in collection '${collection_slug}':\n\n` +
-                  tables.map(t => `• **${t.display_name}** (${t.name})\n  ${t.size ? `${t.size.toLocaleString()} rows` : 'Size unknown'}`).join('\n\n')
+                  tables.map(t => `• **${t.display_name}** (${t.qualified_table_name || t.name})\n  ${t.size ? `${t.size.toLocaleString()} rows` : 'Size unknown'}`).join('\n\n')
           }
         ]
       };

@@ -3,7 +3,7 @@
     "omics-ai": {
       "command": "node",
       "args": ["src/index.js"],
-      "cwd": "/path/to/omics-ai-mcp"
+      "cwd": "/Users/mfiume/Documents/GitHub/omics-ai-mcp"
     }
   }
 }
