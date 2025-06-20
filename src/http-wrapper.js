@@ -138,6 +138,101 @@ app.get('/sessions', (req, res) => {
   res.json({ sessions });
 });
 
+// SSE endpoint for MCP compatibility
+app.all('/sse', async (req, res) => {
+  // Set SSE headers
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+
+  // Create a new MCP session for this SSE connection
+  const sessionId = uuidv4();
+  
+  // Spawn the MCP server as a child process
+  const mcpProcess = spawn('node', ['src/index.js'], {
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: { ...process.env }
+  });
+
+  const session = {
+    id: sessionId,
+    process: mcpProcess,
+    buffer: '',
+    res: res
+  };
+
+  // Handle stdout data from MCP server
+  mcpProcess.stdout.on('data', (data) => {
+    session.buffer += data.toString();
+    
+    // Try to parse complete JSON-RPC messages
+    const lines = session.buffer.split('\n');
+    session.buffer = lines.pop() || '';
+    
+    for (const line of lines) {
+      if (line.trim()) {
+        try {
+          const message = JSON.parse(line);
+          // Send message as SSE event
+          res.write(`data: ${JSON.stringify(message)}\n\n`);
+        } catch (e) {
+          console.error('Failed to parse MCP response:', e);
+        }
+      }
+    }
+  });
+
+  // Handle stderr
+  mcpProcess.stderr.on('data', (data) => {
+    console.error(`MCP stderr [${sessionId}]:`, data.toString());
+  });
+
+  // Handle process exit
+  mcpProcess.on('exit', (code) => {
+    console.log(`MCP process [${sessionId}] exited with code ${code}`);
+    activeSessions.delete(sessionId);
+    res.end();
+  });
+
+  // Handle client disconnect
+  req.on('close', () => {
+    console.log(`SSE client disconnected [${sessionId}]`);
+    mcpProcess.kill();
+    activeSessions.delete(sessionId);
+  });
+
+  activeSessions.set(sessionId, session);
+
+  // Send initial connection event
+  res.write(`data: {"type":"connection","sessionId":"${sessionId}"}\n\n`);
+
+  // Handle POST data for sending messages
+  if (req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => {
+      body += chunk.toString();
+    });
+    
+    req.on('end', () => {
+      try {
+        const message = JSON.parse(body);
+        // Send message to MCP server
+        mcpProcess.stdin.write(JSON.stringify(message) + '\n');
+      } catch (error) {
+        console.error('Error parsing request body:', error);
+        res.write(`data: {"type":"error","message":"Invalid JSON in request body"}\n\n`);
+      }
+    });
+  }
+});
+
 // Cleanup on server shutdown
 process.on('SIGTERM', () => {
   console.log('Shutting down HTTP wrapper...');
