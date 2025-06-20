@@ -138,27 +138,77 @@ app.get('/sessions', (req, res) => {
   res.json({ sessions });
 });
 
-// MCP Streamable HTTP endpoint - following Pipedream's pattern
-app.get('/sse', (req, res) => {
-  // Set SSE headers like Pipedream
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache, no-transform');
+// Simple HTTP endpoint that spawns MCP process and handles communication
+app.all('/mcp', async (req, res) => {
+  // Set CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   
-  // Generate session ID for this connection
-  const sessionId = uuidv4();
-  
-  // Send endpoint information like Pipedream does
-  const endpointUrl = `/v1/omics-ai-mcp/messages?sessionId=${sessionId}`;
-  
-  res.write(`event: endpoint\n`);
-  res.write(`data: ${endpointUrl}\n\n`);
-  
-  // Keep connection alive but don't need to manage MCP process here
-  // The actual MCP communication happens via the messages endpoint
-  req.on('close', () => {
-    console.log(`SSE endpoint connection closed [${sessionId}]`);
-  });
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+
+  try {
+    // Spawn the MCP server as a child process for each request
+    const mcpProcess = spawn('node', ['src/index.js'], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env }
+    });
+
+    let buffer = '';
+    let responses = [];
+
+    // Handle stdout data from MCP server
+    mcpProcess.stdout.on('data', (data) => {
+      buffer += data.toString();
+      
+      // Try to parse complete JSON-RPC messages
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      
+      for (const line of lines) {
+        if (line.trim()) {
+          try {
+            const message = JSON.parse(line);
+            responses.push(message);
+          } catch (e) {
+            console.error('Failed to parse MCP response:', e);
+          }
+        }
+      }
+    });
+
+    // Handle stderr
+    mcpProcess.stderr.on('data', (data) => {
+      console.error(`MCP stderr:`, data.toString());
+    });
+
+    // Send message to MCP server
+    if (req.method === 'POST' && req.body) {
+      const message = req.body;
+      mcpProcess.stdin.write(JSON.stringify(message) + '\n');
+    }
+
+    // Wait for response with timeout
+    const timeout = 30000; // 30 seconds
+    const startTime = Date.now();
+
+    while (responses.length === 0) {
+      if (Date.now() - startTime > timeout) {
+        mcpProcess.kill();
+        return res.status(504).json({ error: 'Request timeout' });
+      }
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+
+    // Kill the process and return the response
+    mcpProcess.kill();
+    res.json(responses[0]);
+  } catch (error) {
+    console.error('Error handling MCP request:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // MCP Messages endpoint for Streamable HTTP protocol
