@@ -138,99 +138,127 @@ app.get('/sessions', (req, res) => {
   res.json({ sessions });
 });
 
-// SSE endpoint for MCP compatibility
-app.all('/sse', async (req, res) => {
-  // Set SSE headers
+// MCP Streamable HTTP endpoint - following Pipedream's pattern
+app.get('/sse', (req, res) => {
+  // Set SSE headers like Pipedream
   res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
-
-  // Create a new MCP session for this SSE connection
+  // Generate session ID for this connection
   const sessionId = uuidv4();
   
-  // Spawn the MCP server as a child process
-  const mcpProcess = spawn('node', ['src/index.js'], {
-    stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env }
-  });
-
-  const session = {
-    id: sessionId,
-    process: mcpProcess,
-    buffer: '',
-    res: res
-  };
-
-  // Handle stdout data from MCP server
-  mcpProcess.stdout.on('data', (data) => {
-    session.buffer += data.toString();
-    
-    // Try to parse complete JSON-RPC messages
-    const lines = session.buffer.split('\n');
-    session.buffer = lines.pop() || '';
-    
-    for (const line of lines) {
-      if (line.trim()) {
-        try {
-          const message = JSON.parse(line);
-          // Send message as SSE event
-          res.write(`data: ${JSON.stringify(message)}\n\n`);
-        } catch (e) {
-          console.error('Failed to parse MCP response:', e);
-        }
-      }
-    }
-  });
-
-  // Handle stderr
-  mcpProcess.stderr.on('data', (data) => {
-    console.error(`MCP stderr [${sessionId}]:`, data.toString());
-  });
-
-  // Handle process exit
-  mcpProcess.on('exit', (code) => {
-    console.log(`MCP process [${sessionId}] exited with code ${code}`);
-    activeSessions.delete(sessionId);
-    res.end();
-  });
-
-  // Handle client disconnect
+  // Send endpoint information like Pipedream does
+  const endpointUrl = `/v1/omics-ai-mcp/messages?sessionId=${sessionId}`;
+  
+  res.write(`event: endpoint\n`);
+  res.write(`data: ${endpointUrl}\n\n`);
+  
+  // Keep connection alive but don't need to manage MCP process here
+  // The actual MCP communication happens via the messages endpoint
   req.on('close', () => {
-    console.log(`SSE client disconnected [${sessionId}]`);
-    mcpProcess.kill();
-    activeSessions.delete(sessionId);
+    console.log(`SSE endpoint connection closed [${sessionId}]`);
   });
+});
 
-  activeSessions.set(sessionId, session);
-
-  // Send initial connection event
-  res.write(`data: {"type":"connection","sessionId":"${sessionId}"}\n\n`);
-
-  // Handle POST data for sending messages
-  if (req.method === 'POST') {
-    let body = '';
-    req.on('data', chunk => {
-      body += chunk.toString();
-    });
-    
-    req.on('end', () => {
-      try {
-        const message = JSON.parse(body);
-        // Send message to MCP server
-        mcpProcess.stdin.write(JSON.stringify(message) + '\n');
-      } catch (error) {
-        console.error('Error parsing request body:', error);
-        res.write(`data: {"type":"error","message":"Invalid JSON in request body"}\n\n`);
-      }
-    });
+// MCP Messages endpoint for Streamable HTTP protocol
+app.post('/v1/omics-ai-mcp/messages', async (req, res) => {
+  const { sessionId } = req.query;
+  
+  if (!sessionId) {
+    return res.status(400).json({ error: 'sessionId query parameter is required' });
   }
+
+  // Set CORS headers
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Content-Type', 'application/json');
+
+  try {
+    // Get or create MCP session
+    let session = activeSessions.get(sessionId);
+    
+    if (!session) {
+      // Create new MCP process for this session
+      const mcpProcess = spawn('node', ['src/index.js'], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: { ...process.env }
+      });
+
+      session = {
+        id: sessionId,
+        process: mcpProcess,
+        buffer: '',
+        responses: []
+      };
+
+      // Handle stdout data from MCP server
+      mcpProcess.stdout.on('data', (data) => {
+        session.buffer += data.toString();
+        
+        // Try to parse complete JSON-RPC messages
+        const lines = session.buffer.split('\n');
+        session.buffer = lines.pop() || '';
+        
+        for (const line of lines) {
+          if (line.trim()) {
+            try {
+              const message = JSON.parse(line);
+              session.responses.push(message);
+            } catch (e) {
+              console.error('Failed to parse MCP response:', e);
+            }
+          }
+        }
+      });
+
+      // Handle stderr
+      mcpProcess.stderr.on('data', (data) => {
+        console.error(`MCP stderr [${sessionId}]:`, data.toString());
+      });
+
+      // Handle process exit
+      mcpProcess.on('exit', (code) => {
+        console.log(`MCP process [${sessionId}] exited with code ${code}`);
+        activeSessions.delete(sessionId);
+      });
+
+      activeSessions.set(sessionId, session);
+    }
+
+    // Clear previous responses
+    session.responses = [];
+
+    // Send message to MCP server
+    const message = req.body;
+    session.process.stdin.write(JSON.stringify(message) + '\n');
+
+    // Wait for response with timeout
+    const timeout = 30000; // 30 seconds
+    const startTime = Date.now();
+
+    while (session.responses.length === 0) {
+      if (Date.now() - startTime > timeout) {
+        return res.status(504).json({ error: 'Request timeout' });
+      }
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+
+    // Return the response
+    res.json(session.responses[0]);
+  } catch (error) {
+    console.error('Error handling MCP message:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Handle OPTIONS requests for CORS
+app.options('/v1/omics-ai-mcp/messages', (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.status(200).end();
 });
 
 // Cleanup on server shutdown
