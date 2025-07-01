@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/mfiume-omics-ai-mcp-badge.png)](https://mseep.ai/app/mfiume-omics-ai-mcp)
+
 # Omics AI MCP Server
 
 A Model Context Protocol (MCP) server that enables AI agents to conversationally interact with Omics AI Explorer networks for genomics research and data analysis.
